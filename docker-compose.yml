@@ -1,0 +1,116 @@
+version: '3.8'
+
+services:
+  source_db:
+    image: postgres:alpine
+    container_name: source_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${SOURCE_DB_USER}
+      POSTGRES_PASSWORD: ${SOURCE_DB_PASSWORD}
+      POSTGRES_DB: ${SOURCE_DB_NAME}
+    ports:
+      - "5431:5432"
+    volumes:
+      - source_db_data:/var/lib/postgresql
+      - ./sql/source_schema.sql:/docker-entrypoint-initdb.d/source_schema.sql
+    networks:
+      - pipeline_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  target_db:
+    image: postgres:alpine
+    container_name: target_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TARGET_DB_USER}
+      POSTGRES_PASSWORD: ${TARGET_DB_PASSWORD}
+      POSTGRES_DB: ${TARGET_DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - target_db_data:/var/lib/postgresql
+      - ./sql/target_schema.sql:/docker-entrypoint-initdb.d/01_target_schema.sql
+      - ./sql/indexes.sql:/docker-entrypoint-initdb.d/02_indexes.sql
+    networks:
+      - pipeline_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  extractor:
+    build:
+      context: .
+      dockerfile: extractor/Dockerfile
+    container_name: extractor
+    environment:
+      - API_NINJAS_API_KEY=${API_NINJAS_API_KEY}
+      - SOURCE_DB_HOST=${SOURCE_DB_HOST}
+      - SOURCE_DB_PORT=${SOURCE_DB_PORT}
+      - SOURCE_DB_USER=${SOURCE_DB_USER}
+      - SOURCE_DB_PASSWORD=${SOURCE_DB_PASSWORD}
+      - SOURCE_DB_NAME=${SOURCE_DB_NAME}
+    depends_on:
+      source_db:
+        condition: service_healthy
+    networks:
+      - pipeline_network
+
+  transformer:
+    build:
+      context: .
+      dockerfile: transformer/Dockerfile
+    container_name: transformer
+    environment:
+      - SOURCE_DB_HOST=${SOURCE_DB_HOST}
+      - SOURCE_DB_PORT=${SOURCE_DB_PORT}
+      - SOURCE_DB_USER=${SOURCE_DB_USER}
+      - SOURCE_DB_PASSWORD=${SOURCE_DB_PASSWORD}
+      - SOURCE_DB_NAME=${SOURCE_DB_NAME}
+      - TARGET_DB_HOST=${TARGET_DB_HOST}
+      - TARGET_DB_PORT=${TARGET_DB_PORT}
+      - TARGET_DB_USER=${TARGET_DB_USER}
+      - TARGET_DB_PASSWORD=${TARGET_DB_PASSWORD}
+      - TARGET_DB_NAME=${TARGET_DB_NAME}
+    depends_on:
+      source_db:
+        condition: service_healthy
+      target_db:
+        condition: service_healthy
+    networks:
+      - pipeline_network
+
+  cli_app:
+    build:
+      context: .
+      dockerfile: cli_app/Dockerfile
+    container_name: cli_app
+    environment:
+      - TARGET_DB_HOST=${TARGET_DB_HOST}
+      - TARGET_DB_PORT=${TARGET_DB_PORT}
+      - TARGET_DB_USER=${TARGET_DB_USER}
+      - TARGET_DB_PASSWORD=${TARGET_DB_PASSWORD}
+      - TARGET_DB_NAME=${TARGET_DB_NAME}
+    depends_on:
+      target_db:
+        condition: service_healthy
+    networks:
+      - pipeline_network
+    stdin_open: true
+    tty: true
+
+volumes:
+  source_db_data:
+    driver: local
+  target_db_data:
+    driver: local
+
+networks:
+  pipeline_network:
+    driver: bridge
